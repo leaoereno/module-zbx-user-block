@@ -1,6 +1,10 @@
 # zbx-block-user
 
+<<<<<<< HEAD
 M�dulo para **Zabbix 7.0 LTS** que adiciona um botão **"Bloquear"** na listagem de usuários (`Usuários > Usuários`), permitindo bloquear imediatamente contas locais sem workarounds manuais.
+=======
+M�dulo para **Zabbix 7.0 LTS** que adiciona um botão **"Bloquear"** na listagem de usuários (`Usuários > Usuários`), permitindo bloquear imediatamente contas locais sem workarounds manuais.
+>>>>>>> 6858537 (inclusão do README.md com processo de instalação)
 
 ---
 
