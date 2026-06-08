@@ -3,14 +3,18 @@
     "id": "zbx-block-user",
     "name": "Block Local User",
     "version": "1.0.0",
-    "author": "Rafael Leão",
-    "url": "https://github.com/leaoereno/zbx-block-user",
-    "description": "Adds a Block button to the Users list to immediately lock local Zabbix accounts without brute-force workarounds.",
+    "author": "Rafael Le\u00e3o",
     "namespace": "BlockUser",
+    "description": "Adds a Block button to the Users list to immediately lock local Zabbix accounts without brute-force workarounds.",
     "actions": {
         "blockuser.block": {
             "class": "CControllerBlockUserBlock",
             "layout": "layout.json"
         }
+    },
+    "assets": {
+        "js": [
+            "block_user.js"
+        ]
     }
 }
