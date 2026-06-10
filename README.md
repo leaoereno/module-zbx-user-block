@@ -434,3 +434,9 @@ zbx-user-block/
 ## Autor
 
 Rafael Leao -- [@leaoereno](https://github.com/leaoereno)
+
+## Créditos
+- **Mantenedor do fork:** Rafael M. A. Leão Ereno (MALE)
+- **LinkedIn:** https://www.linkedin.com/in/leaoereno/
+- **Projeto original:** NOC Team
+- **Inspirado no projeto da Monzphere**

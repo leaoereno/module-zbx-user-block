@@ -3,7 +3,7 @@
     "id": "zbx-block-user",
     "name": "Block Local User",
     "version": "1.0.0",
-    "author": "Rafael Le\u00e3o",
+    "author": "Rafael M. A. Leão Ereno - MALE",
     "namespace": "BlockUser",
     "description": "Adds a Block button to the Users list to immediately lock local Zabbix accounts without brute-force workarounds.",
     "actions": {
@@ -16,5 +16,6 @@
         "js": [
             "block_user.js"
         ]
-    }
+    },
+    "url": "https://www.linkedin.com/in/leaoereno/"
 }
