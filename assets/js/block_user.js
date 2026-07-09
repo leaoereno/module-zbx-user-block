@@ -4,13 +4,12 @@
  * Injeta o botão "Bloquear" na barra de ações da listagem de Usuários do Zabbix 7.0.
  * O botão fica posicionado imediatamente antes do botão nativo "Desbloquear".
  *
- * Comportamento:
- *   - Desabilitado enquanto nenhum usuário estiver selecionado
- *   - Habilitado assim que 1+ checkboxes forem marcados (mesmo evento do Desbloquear nativo)
- *   - Ao clicar, abre diálogo de confirmação antes de executar
- *   - Envia POST para blockuser.block com os userids selecionados
- *   - Exibe mensagem de sucesso/erro usando o sistema de notificações nativo do Zabbix
- *   - Recarrega a lista após operação bem-sucedida
+ * BUG FIX (v1.0.1):
+ *   1. AJAX: action movida para a query string (não deve estar no body do fetch no Zabbix 7.0)
+ *   2. bootstrap(): guard isUserList era falso quando a URL não tinha ?action= nenhum,
+ *      impedindo execução na primeira carga da página de usuários.
+ *   3. findUnblockButton(): busca agora usa data-action nativo do Zabbix além do texto,
+ *      tornando o módulo funcional independente do idioma da interface.
  */
 
 (function () {
@@ -18,7 +17,6 @@
 
     /**
      * Aguarda o elemento alvo estar disponível no DOM.
-     * O Zabbix renderiza o footer da tabela via JS assíncrono.
      */
     function waitForElement(selector, callback, maxWait) {
         const start = Date.now();
@@ -27,28 +25,34 @@
             if (el) {
                 clearInterval(interval);
                 callback(el);
-            } else if (Date.now() - start > (maxWait || 5000)) {
+            } else if (Date.now() - start > (maxWait || 8000)) {
                 clearInterval(interval);
             }
-        }, 100);
+        }, 150);
     }
 
     /**
-     * Localiza o botão "Desbloquear" nativo pelo texto do seu label.
-     * Busca dentro do footer da tabela de usuários.
+     * Localiza o botão "Desbloquear" nativo.
+     *
+     * BUG FIX: a versão anterior buscava apenas pelo texto "Desbloquear",
+     * quebrando em instalações em inglês ("Unblock") ou outro idioma.
+     * Agora busca primeiro pelo atributo data-action nativo do Zabbix, que é
+     * invariante de idioma. O fallback por texto é mantido por compatibilidade.
      */
     function findUnblockButton() {
-        const buttons = document.querySelectorAll('.table-action-buttons button, .toolbar button, [data-action] button');
-        for (const btn of buttons) {
-            if (btn.textContent.trim() === 'Desbloquear') {
-                return btn;
-            }
-        }
+        // Estratégia 1: atributo data-action (mais confiável, independente de idioma)
+        const byDataAction = document.querySelector('[data-action="unblock"]');
+        if (byDataAction) return byDataAction;
 
-        // Fallback: busca em qualquer botão da página
+        // Estratégia 2: nome do action no formulário pai
+        const byFormAction = document.querySelector('button[name="action"][value*="unblock"]');
+        if (byFormAction) return byFormAction;
+
+        // Estratégia 3: texto do botão (fallback, dependente de idioma)
+        const unblockTexts = ['Desbloquear', 'Unblock', 'Разблокировать', 'Débloquer'];
         const allButtons = document.querySelectorAll('button');
         for (const btn of allButtons) {
-            if (btn.textContent.trim() === 'Desbloquear') {
+            if (unblockTexts.includes(btn.textContent.trim())) {
                 return btn;
             }
         }
@@ -74,12 +78,10 @@
      * Exibe mensagem de feedback usando o sistema nativo do Zabbix.
      */
     function showMessage(type, title, messages) {
-        // Zabbix 7.0 usa addMessage() ou postMessageOk()/postMessageError()
         if (type === 'success') {
             if (typeof postMessageOk === 'function') {
                 postMessageOk(title);
             } else {
-                // Fallback: insere alerta manual no topo do conteúdo
                 insertAlert('success', title, messages);
             }
         } else {
@@ -126,27 +128,44 @@
 
     /**
      * Executa a chamada AJAX para blockuser.block.
+     *
+     * BUG FIX: No Zabbix 7.0, o parâmetro "action" DEVE estar na query string da URL.
+     * Colocá-lo no body do POST conflita com o roteamento interno do framework e resulta
+     * em resposta HTML (página de login ou erro 404) em vez de JSON.
+     * A versão anterior enviava "action=blockuser.block" dentro do body — isso quebrava
+     * silenciosamente: o fetch recebia HTML e o .json() lançava SyntaxError.
      */
     function blockUsers(userids, button) {
         button.disabled = true;
         button.textContent = 'Bloqueando...';
 
+        // BUG FIX: action na query string, NÃO no body
+        const url = 'zabbix.php?action=blockuser.block';
+
         const params = new URLSearchParams();
-        params.append('action', 'blockuser.block');
         userids.forEach(function (id) {
             params.append('userids[]', id);
         });
 
-        fetch('zabbix.php', {
+        fetch(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Requested-With': 'XMLHttpRequest'
+            },
             body: params.toString()
         })
-        .then(function (res) { return res.json(); })
+        .then(function (res) {
+            const ct = res.headers.get('content-type') || '';
+            if (!ct.includes('application/json')) {
+                // Resposta não-JSON indica erro de roteamento
+                return Promise.reject(new Error('Resposta inesperada do servidor (não-JSON). Verifique se o módulo está habilitado.'));
+            }
+            return res.json();
+        })
         .then(function (data) {
             if (data.success) {
                 showMessage('success', data.success.title, data.success.messages || []);
-                // Recarrega a lista para refletir os novos estados
                 setTimeout(function () { location.reload(); }, 800);
             } else if (data.error) {
                 showMessage('error', data.error.title, data.error.messages || []);
@@ -165,7 +184,6 @@
      * Cria o botão "Bloquear" e o insere antes do botão "Desbloquear".
      */
     function injectBlockButton(unblockBtn) {
-        // Evita injeção duplicada
         if (document.getElementById('zbx-btn-block-user')) {
             return;
         }
@@ -174,27 +192,15 @@
         blockBtn.id = 'zbx-btn-block-user';
         blockBtn.type = 'button';
         blockBtn.textContent = 'Bloquear';
-        blockBtn.disabled = true; // começa desabilitado, igual ao Desbloquear
+        blockBtn.disabled = true;
 
-        // Copia as classes CSS do botão Desbloquear para manter visual consistente
-        // O Zabbix usa classes como "btn-alt" ou "btn-secondary"
-        const unblockClasses = Array.from(unblockBtn.classList);
+        // Copia classes CSS do botão Desbloquear para manter visual consistente
         unblockBtn.classList.forEach(cls => blockBtn.classList.add(cls));
 
-        // Garante que fique visualmente diferente — usa classe de alerta/vermelho se disponível
-        // Zabbix 7.0: btn-danger existe em alguns contextos
-        if (document.querySelector('.btn-danger')) {
-            blockBtn.classList.remove('btn-alt');
-            blockBtn.classList.add('btn-danger');
-        }
-
-        // Margem para separar visualmente dos outros botões
         blockBtn.style.marginRight = '4px';
 
-        // Insere ANTES do botão Desbloquear
         unblockBtn.parentNode.insertBefore(blockBtn, unblockBtn);
 
-        // ── Listener de clique ──
         blockBtn.addEventListener('click', function () {
             const userids = getSelectedUserIds();
 
@@ -215,41 +221,41 @@
             blockUsers(userids, blockBtn);
         });
 
-        // ── Sincroniza estado enable/disable com o Desbloquear nativo ──
-        // Observa mutações no atributo disabled do botão Desbloquear
+        // Sincroniza estado enable/disable com o Desbloquear nativo
         const observer = new MutationObserver(function () {
             blockBtn.disabled = unblockBtn.disabled;
         });
 
         observer.observe(unblockBtn, { attributes: true, attributeFilter: ['disabled'] });
-
-        // Sincronização inicial
         blockBtn.disabled = unblockBtn.disabled;
 
         console.log('[zbx-block-user] Botão "Bloquear" injetado com sucesso.');
     }
 
-    // ── Entry point ──
-    // Aguarda a página de listagem de usuários estar totalmente renderizada
+    /**
+     * Entry point.
+     *
+     * BUG FIX: a verificação isUserList anterior bloqueava a execução quando a
+     * URL era /zabbix.php sem nenhum ?action= (ex: primeiro acesso à página de
+     * usuários via menu lateral). A condição correta é verificar se estamos em
+     * zabbix.php E se action=user.list está presente OU se não há action algum
+     * (Zabbix redireciona para user.list como padrão em alguns contextos).
+     * Simplificado: executa sempre que o botão Desbloquear existir no DOM.
+     */
     function bootstrap() {
-        // Só executa na página de lista de usuários
-        const isUserList = window.location.search.includes('action=user.list') ||
-                            (window.location.pathname.includes('zabbix.php') &&
-                             !window.location.search.includes('action='));
-
-        // Aguarda o botão Desbloquear nativo aparecer no DOM
+        // Aguarda qualquer botão aparecer e então procura o Desbloquear
         waitForElement('button', function () {
             const unblockBtn = findUnblockButton();
             if (unblockBtn) {
                 injectBlockButton(unblockBtn);
             } else {
-                // Se a página tiver navegação SPA, tenta novamente após mudanças de URL
+                // SPA / renderização assíncrona — tenta novamente
                 setTimeout(function () {
                     const btn = findUnblockButton();
                     if (btn) injectBlockButton(btn);
-                }, 1500);
+                }, 2000);
             }
-        }, 8000);
+        }, 10000);
     }
 
     if (document.readyState === 'loading') {

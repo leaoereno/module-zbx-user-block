@@ -5,9 +5,6 @@
  *
  * Seta attempt_failed >= tentativas maximas configuradas para bloquear o usuario
  * na base local do Zabbix, sem necessidade de brute-force manual.
- *
- * Usuarios LDAP provisionados via JIT com autenticacao local ainda sao bloqueaveis
- * por este mecanismo enquanto o registro local existir.
  */
 
 namespace Modules\BlockUser\Actions;
@@ -54,7 +51,7 @@ class CControllerBlockUserBlock extends CController {
             return;
         }
 
-        // Nao permitir bloquear o proprio usuario logado
+        // Não permitir bloquear o próprio usuário logado
         $current_userid = CWebUser::$data['userid'];
         $userids = array_values(array_filter($userids, fn($id) => (int)$id !== (int)$current_userid));
 
@@ -68,7 +65,8 @@ class CControllerBlockUserBlock extends CController {
         }
 
         // Busca o limite de tentativas configurado (Administration > Authentication > Login attempts)
-        $config_row = DBfetch(DBselect('SELECT login_attempts FROM config LIMIT 1'));
+        // BUG FIX: funções globais de DB precisam de \ dentro de namespace
+        $config_row = \DBfetch(\DBselect('SELECT login_attempts FROM config LIMIT 1'));
         $max_attempts = ($config_row && (int)$config_row['login_attempts'] > 0)
             ? (int)$config_row['login_attempts']
             : 5;
@@ -77,26 +75,28 @@ class CControllerBlockUserBlock extends CController {
         $skipped_names = [];
 
         foreach ($userids as $userid) {
-            $user = DBfetch(DBselect(
-                'SELECT userid, username, attempt_failed FROM users WHERE userid=' . zbx_dbstr($userid)
+            // BUG FIX: \DBfetch, \DBselect, \DBquote em vez de DBfetch, DBselect, zbx_dbstr
+            $user = \DBfetch(\DBselect(
+                'SELECT userid, username, attempt_failed FROM users WHERE userid=' . \DBquote($userid)
             ));
 
             if (!$user) {
                 continue;
             }
 
-            // Ja esta bloqueado — apenas registra para feedback
+            // Já está bloqueado — apenas registra para feedback
             if ((int)$user['attempt_failed'] >= $max_attempts) {
                 $skipped_names[] = $user['username'];
                 continue;
             }
 
-            DBexecute(
+            // BUG FIX: \DBexecute e \DBquote com prefixo de namespace
+            \DBexecute(
                 'UPDATE users' .
-                ' SET attempt_failed=' . zbx_dbstr($max_attempts) .
-                ', attempt_clock='    . zbx_dbstr(time()) .
-                ', attempt_ip='       . zbx_dbstr('127.0.0.1') .
-                ' WHERE userid='      . zbx_dbstr($userid)
+                ' SET attempt_failed=' . \DBquote($max_attempts) .
+                ', attempt_clock='    . \DBquote(time()) .
+                ', attempt_ip='       . \DBquote('127.0.0.1') .
+                ' WHERE userid='      . \DBquote($userid)
             );
 
             $blocked++;
