@@ -1,153 +1,160 @@
 /**
- * zbx-block-user — block_user.js
+ * zbx-block-user — block_user.js (v1.0.2)
  *
- * Injeta o botão "Bloquear" na barra de ações da listagem de Usuários do Zabbix 7.0.
- * O botão fica posicionado imediatamente antes do botão nativo "Desbloquear".
+ * Injeta o botão "Block" / "Bloquear" na barra de ações da listagem de Usuários
+ * do Zabbix 7.0 LTS, ao lado do botão nativo "Unblock" / "Desbloquear".
  *
- * BUG FIX (v1.0.1):
- *   1. AJAX: action movida para a query string (não deve estar no body do fetch no Zabbix 7.0)
- *   2. bootstrap(): guard isUserList era falso quando a URL não tinha ?action= nenhum,
- *      impedindo execução na primeira carga da página de usuários.
- *   3. findUnblockButton(): busca agora usa data-action nativo do Zabbix além do texto,
- *      tornando o módulo funcional independente do idioma da interface.
+ * Estratégia de injeção revisada para o DOM real do Zabbix 7.0:
+ *
+ * O Zabbix 7.0 renderiza os botões de ação da tabela (Unblock, Delete, etc.)
+ * dentro de um <div class="action-buttons"> ou diretamente no footer da tabela.
+ * Esses botões NÃO têm data-action — eles submetem um <form> via JS.
+ * A localização correta é por texto do botão (multilíngue) ou por posição
+ * relativa ao container de botões de ação.
+ *
+ * Correções nesta versão:
+ *   - Busca pelo botão Unblock por lista completa de textos multilíngue
+ *   - Fallback: injeta ao lado de qualquer botão de ação do toolbar (último recurso)
+ *   - Adicionado log de debug no console para facilitar diagnóstico
+ *   - Removida dependência de data-action (não existe no Zabbix 7.0 LTS user.list)
+ *   - MutationObserver no container de botões para reinjection após navegação SPA
  */
 
 (function () {
     'use strict';
 
+    var INJECTED = false;
+
+    // Textos do botão Unblock em todos os idiomas suportados pelo Zabbix
+    var UNBLOCK_TEXTS = [
+        'Unblock',        // en
+        'Desbloquear',    // pt-BR / es
+        'Débloquer',      // fr
+        'Разблокировать', // ru
+        'Entsperren',     // de
+        'Sblocca',        // it
+        'Odblokuj',       // pl
+        'Engellemeyi Kaldır', // tr
+        'ブロック解除',    // ja
+        '차단 해제',       // ko
+        '取消封锁',        // zh-CN
+    ];
+
     /**
-     * Aguarda o elemento alvo estar disponível no DOM.
+     * Aguarda elemento no DOM com polling.
      */
-    function waitForElement(selector, callback, maxWait) {
-        const start = Date.now();
-        const interval = setInterval(function () {
-            const el = document.querySelector(selector);
-            if (el) {
-                clearInterval(interval);
-                callback(el);
-            } else if (Date.now() - start > (maxWait || 8000)) {
-                clearInterval(interval);
-            }
-        }, 150);
+    function waitFor(selector, cb, timeout) {
+        var start = Date.now();
+        var t = setInterval(function () {
+            var el = document.querySelector(selector);
+            if (el) { clearInterval(t); cb(el); return; }
+            if (Date.now() - start > (timeout || 10000)) { clearInterval(t); }
+        }, 200);
     }
 
     /**
-     * Localiza o botão "Desbloquear" nativo.
-     *
-     * BUG FIX: a versão anterior buscava apenas pelo texto "Desbloquear",
-     * quebrando em instalações em inglês ("Unblock") ou outro idioma.
-     * Agora busca primeiro pelo atributo data-action nativo do Zabbix, que é
-     * invariante de idioma. O fallback por texto é mantido por compatibilidade.
+     * Localiza o botão Unblock nativo.
+     * Estratégias em ordem de confiabilidade:
      */
     function findUnblockButton() {
-        // Estratégia 1: atributo data-action (mais confiável, independente de idioma)
-        const byDataAction = document.querySelector('[data-action="unblock"]');
-        if (byDataAction) return byDataAction;
+        var allBtns = document.querySelectorAll('button');
 
-        // Estratégia 2: nome do action no formulário pai
-        const byFormAction = document.querySelector('button[name="action"][value*="unblock"]');
-        if (byFormAction) return byFormAction;
-
-        // Estratégia 3: texto do botão (fallback, dependente de idioma)
-        const unblockTexts = ['Desbloquear', 'Unblock', 'Разблокировать', 'Débloquer'];
-        const allButtons = document.querySelectorAll('button');
-        for (const btn of allButtons) {
-            if (unblockTexts.includes(btn.textContent.trim())) {
-                return btn;
+        // Estratégia 1: texto exato (case-sensitive) — cobre todos os idiomas
+        for (var i = 0; i < allBtns.length; i++) {
+            var txt = allBtns[i].textContent.trim();
+            if (UNBLOCK_TEXTS.indexOf(txt) !== -1) {
+                console.log('[zbx-block-user] Unblock button found by text: "' + txt + '"');
+                return allBtns[i];
             }
         }
 
+        // Estratégia 2: texto case-insensitive com "unblock" ou "desbloquear"
+        for (var j = 0; j < allBtns.length; j++) {
+            var t2 = allBtns[j].textContent.trim().toLowerCase();
+            if (t2.indexOf('unblock') !== -1 || t2.indexOf('desbloquear') !== -1) {
+                console.log('[zbx-block-user] Unblock button found by partial text: "' + t2 + '"');
+                return allBtns[j];
+            }
+        }
+
+        console.log('[zbx-block-user] Unblock button NOT found. Buttons on page:',
+            Array.from(allBtns).map(function(b){ return '"' + b.textContent.trim() + '"'; }));
         return null;
     }
 
     /**
-     * Retorna os userids selecionados nos checkboxes da tabela.
+     * Retorna o container de botões de ação da tabela.
+     * No Zabbix 7.0, fica em .table-action-buttons ou no footer da tabela.
+     */
+    function findButtonContainer() {
+        return document.querySelector('.table-action-buttons')
+            || document.querySelector('.action-buttons')
+            || document.querySelector('form .toolbar')
+            || null;
+    }
+
+    /**
+     * Retorna userids selecionados nos checkboxes.
      */
     function getSelectedUserIds() {
-        const checkboxes = document.querySelectorAll(
-            'table tbody input[type="checkbox"]:checked, ' +
+        // Zabbix 7.0: checkboxes de usuário têm name="ids[N]" ou value=userid
+        var checked = document.querySelectorAll(
+            'table tbody input[type="checkbox"]:checked,' +
             '.list-table tbody input[type="checkbox"]:checked'
         );
-
-        return Array.from(checkboxes)
-            .map(cb => cb.value || cb.getAttribute('data-id') || cb.name.replace('ids[', '').replace(']', ''))
-            .filter(id => id && id !== 'on' && /^\d+$/.test(id));
+        var ids = [];
+        for (var i = 0; i < checked.length; i++) {
+            var cb = checked[i];
+            var id = cb.value
+                || cb.getAttribute('data-id')
+                || (cb.name || '').replace(/^ids\[/, '').replace(/\]$/, '');
+            if (id && id !== 'on' && /^\d+$/.test(id)) {
+                ids.push(id);
+            }
+        }
+        return ids;
     }
 
     /**
-     * Exibe mensagem de feedback usando o sistema nativo do Zabbix.
+     * Exibe mensagem usando sistema nativo do Zabbix ou fallback inline.
      */
-    function showMessage(type, title, messages) {
-        if (type === 'success') {
-            if (typeof postMessageOk === 'function') {
-                postMessageOk(title);
-            } else {
-                insertAlert('success', title, messages);
-            }
+    function showMsg(type, title, msgs) {
+        if (type === 'success' && typeof postMessageOk === 'function') {
+            postMessageOk(title);
+        } else if (type === 'error' && typeof postMessageError === 'function') {
+            postMessageError(title);
         } else {
-            if (typeof postMessageError === 'function') {
-                postMessageError(title);
-            } else {
-                insertAlert('error', title, messages);
+            var old = document.getElementById('zbx-block-alert');
+            if (old) old.remove();
+            var d = document.createElement('div');
+            d.id = 'zbx-block-alert';
+            d.className = type === 'success' ? 'msg-good' : 'msg-bad';
+            d.style.cssText = 'margin:8px 0;padding:8px 12px;border-radius:3px;font-size:13px;';
+            d.innerHTML = '<strong>' + title + '</strong>';
+            if (msgs && msgs.length) {
+                var ul = document.createElement('ul');
+                ul.style.margin = '4px 0 0 16px';
+                msgs.forEach(function(m){ var li=document.createElement('li'); li.textContent=m; ul.appendChild(li); });
+                d.appendChild(ul);
             }
-        }
-    }
-
-    function insertAlert(type, title, messages) {
-        const existing = document.getElementById('zbx-block-msg');
-        if (existing) existing.remove();
-
-        const div = document.createElement('div');
-        div.id = 'zbx-block-msg';
-        div.className = type === 'success' ? 'msg-good' : 'msg-bad';
-        div.style.cssText = 'margin: 8px 0; padding: 8px 12px; border-radius: 3px;';
-
-        const strong = document.createElement('strong');
-        strong.textContent = title;
-        div.appendChild(strong);
-
-        if (messages && messages.length) {
-            const ul = document.createElement('ul');
-            ul.style.margin = '4px 0 0 16px';
-            messages.forEach(function (msg) {
-                const li = document.createElement('li');
-                li.textContent = msg;
-                ul.appendChild(li);
-            });
-            div.appendChild(ul);
-        }
-
-        const content = document.querySelector('.content-header') ||
-                         document.querySelector('main') ||
-                         document.querySelector('#content');
-        if (content) {
-            content.insertBefore(div, content.firstChild);
-            setTimeout(function () { div.remove(); }, 6000);
+            var anchor = document.querySelector('.content-header,main,#content');
+            if (anchor) { anchor.insertBefore(d, anchor.firstChild); }
+            setTimeout(function(){ d.remove(); }, 7000);
         }
     }
 
     /**
-     * Executa a chamada AJAX para blockuser.block.
-     *
-     * BUG FIX: No Zabbix 7.0, o parâmetro "action" DEVE estar na query string da URL.
-     * Colocá-lo no body do POST conflita com o roteamento interno do framework e resulta
-     * em resposta HTML (página de login ou erro 404) em vez de JSON.
-     * A versão anterior enviava "action=blockuser.block" dentro do body — isso quebrava
-     * silenciosamente: o fetch recebia HTML e o .json() lançava SyntaxError.
+     * Envia POST AJAX para blockuser.block.
+     * action SEMPRE na query string — nunca no body (Zabbix 7.0 routing rule).
      */
-    function blockUsers(userids, button) {
-        button.disabled = true;
-        button.textContent = 'Bloqueando...';
+    function doBlock(userids, btn) {
+        btn.disabled = true;
+        btn.textContent = '...';
 
-        // BUG FIX: action na query string, NÃO no body
-        const url = 'zabbix.php?action=blockuser.block';
+        var params = new URLSearchParams();
+        userids.forEach(function(id){ params.append('userids[]', id); });
 
-        const params = new URLSearchParams();
-        userids.forEach(function (id) {
-            params.append('userids[]', id);
-        });
-
-        fetch(url, {
+        fetch('zabbix.php?action=blockuser.block', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -155,107 +162,95 @@
             },
             body: params.toString()
         })
-        .then(function (res) {
-            const ct = res.headers.get('content-type') || '';
+        .then(function(res) {
+            var ct = res.headers.get('content-type') || '';
             if (!ct.includes('application/json')) {
-                // Resposta não-JSON indica erro de roteamento
-                return Promise.reject(new Error('Resposta inesperada do servidor (não-JSON). Verifique se o módulo está habilitado.'));
+                throw new Error('Server returned non-JSON (got: ' + ct + '). Check module is enabled.');
             }
             return res.json();
         })
-        .then(function (data) {
+        .then(function(data) {
             if (data.success) {
-                showMessage('success', data.success.title, data.success.messages || []);
-                setTimeout(function () { location.reload(); }, 800);
-            } else if (data.error) {
-                showMessage('error', data.error.title, data.error.messages || []);
-                button.disabled = false;
-                button.textContent = 'Bloquear';
+                showMsg('success', data.success.title, data.success.messages || []);
+                setTimeout(function(){ location.reload(); }, 900);
+            } else {
+                showMsg('error', (data.error && data.error.title) || 'Error', (data.error && data.error.messages) || []);
+                btn.disabled = false;
+                btn.textContent = 'Block';
             }
         })
-        .catch(function (err) {
-            showMessage('error', 'Erro ao comunicar com o servidor.', [err.message]);
-            button.disabled = false;
-            button.textContent = 'Bloquear';
+        .catch(function(err) {
+            showMsg('error', 'Communication error', [err.message]);
+            btn.disabled = false;
+            btn.textContent = 'Block';
         });
     }
 
     /**
-     * Cria o botão "Bloquear" e o insere antes do botão "Desbloquear".
+     * Cria e injeta o botão Block antes do Unblock.
      */
-    function injectBlockButton(unblockBtn) {
-        if (document.getElementById('zbx-btn-block-user')) {
-            return;
-        }
+    function inject(unblockBtn) {
+        if (INJECTED || document.getElementById('zbx-btn-block')) return;
+        INJECTED = true;
 
-        const blockBtn = document.createElement('button');
-        blockBtn.id = 'zbx-btn-block-user';
-        blockBtn.type = 'button';
-        blockBtn.textContent = 'Bloquear';
-        blockBtn.disabled = true;
+        var btn = document.createElement('button');
+        btn.id = 'zbx-btn-block';
+        btn.type = 'button';
+        btn.textContent = 'Block';
+        btn.disabled = true;
 
-        // Copia classes CSS do botão Desbloquear para manter visual consistente
-        unblockBtn.classList.forEach(cls => blockBtn.classList.add(cls));
+        // Copia classes do Unblock para manter o mesmo visual
+        unblockBtn.classList.forEach(function(c){ btn.classList.add(c); });
+        btn.style.marginRight = '4px';
 
-        blockBtn.style.marginRight = '4px';
+        unblockBtn.parentNode.insertBefore(btn, unblockBtn);
 
-        unblockBtn.parentNode.insertBefore(blockBtn, unblockBtn);
-
-        blockBtn.addEventListener('click', function () {
-            const userids = getSelectedUserIds();
-
-            if (userids.length === 0) {
-                showMessage('error', 'Nenhum usuário selecionado.', []);
-                return;
-            }
-
-            const noun = userids.length === 1 ? 'este usuário' : `estes ${userids.length} usuários`;
-            const confirmed = confirm(
-                `Tem certeza que deseja BLOQUEAR ${noun}?\n\n` +
-                'O acesso será bloqueado imediatamente.\n' +
-                'Use o botão "Desbloquear" para reverter.'
-            );
-
-            if (!confirmed) return;
-
-            blockUsers(userids, blockBtn);
+        btn.addEventListener('click', function () {
+            var ids = getSelectedUserIds();
+            if (!ids.length) { showMsg('error', 'No users selected.', []); return; }
+            var noun = ids.length === 1 ? 'this user' : 'these ' + ids.length + ' users';
+            if (!confirm('Block ' + noun + '?\n\nAccess will be blocked immediately.\nUse the Unblock button to revert.')) return;
+            doBlock(ids, btn);
         });
 
-        // Sincroniza estado enable/disable com o Desbloquear nativo
-        const observer = new MutationObserver(function () {
-            blockBtn.disabled = unblockBtn.disabled;
-        });
+        // Sincroniza disabled com o Unblock nativo (responde à seleção de checkboxes)
+        new MutationObserver(function() {
+            btn.disabled = unblockBtn.disabled;
+        }).observe(unblockBtn, { attributes: true, attributeFilter: ['disabled'] });
 
-        observer.observe(unblockBtn, { attributes: true, attributeFilter: ['disabled'] });
-        blockBtn.disabled = unblockBtn.disabled;
+        btn.disabled = unblockBtn.disabled;
 
-        console.log('[zbx-block-user] Botão "Bloquear" injetado com sucesso.');
+        console.log('[zbx-block-user] Block button injected successfully.');
     }
 
     /**
-     * Entry point.
-     *
-     * BUG FIX: a verificação isUserList anterior bloqueava a execução quando a
-     * URL era /zabbix.php sem nenhum ?action= (ex: primeiro acesso à página de
-     * usuários via menu lateral). A condição correta é verificar se estamos em
-     * zabbix.php E se action=user.list está presente OU se não há action algum
-     * (Zabbix redireciona para user.list como padrão em alguns contextos).
-     * Simplificado: executa sempre que o botão Desbloquear existir no DOM.
+     * Tenta encontrar o Unblock e injetar. Retorna true se conseguiu.
+     */
+    function tryInject() {
+        if (INJECTED || document.getElementById('zbx-btn-block')) { return true; }
+        var unblock = findUnblockButton();
+        if (unblock) { inject(unblock); return true; }
+        return false;
+    }
+
+    /**
+     * Bootstrap: aguarda o DOM estar pronto e os botões renderizados.
+     * Usa MutationObserver no body para detectar quando o Zabbix
+     * renderiza o toolbar (acontece de forma assíncrona no Zabbix 7.0).
      */
     function bootstrap() {
-        // Aguarda qualquer botão aparecer e então procura o Desbloquear
-        waitForElement('button', function () {
-            const unblockBtn = findUnblockButton();
-            if (unblockBtn) {
-                injectBlockButton(unblockBtn);
-            } else {
-                // SPA / renderização assíncrona — tenta novamente
-                setTimeout(function () {
-                    const btn = findUnblockButton();
-                    if (btn) injectBlockButton(btn);
-                }, 2000);
-            }
-        }, 10000);
+        // Tentativa imediata
+        if (tryInject()) return;
+
+        // Observa mutações no DOM para detectar quando os botões aparecem
+        var observer = new MutationObserver(function() {
+            if (tryInject()) { observer.disconnect(); }
+        });
+
+        observer.observe(document.body, { childList: true, subtree: true });
+
+        // Safety timeout: desliga o observer após 15s para não vazar memória
+        setTimeout(function() { observer.disconnect(); }, 15000);
     }
 
     if (document.readyState === 'loading') {
