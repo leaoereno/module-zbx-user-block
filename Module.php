@@ -6,6 +6,8 @@ use Zabbix\Core\CModule;
 class Module extends CModule {
 
     public function init(): void {
+        // Guard umbrella Usuarios
+        if (defined('ZBX_USUARIOS_ACTIVE') && ZBX_USUARIOS_ACTIVE === true) { return; }
         // O Zabbix 7.0 NÃO injeta views de módulo em actions nativas (user.list).
         // registerDirectory() só funciona para actions declaradas no manifest.
         //
